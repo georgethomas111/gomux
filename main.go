@@ -5,7 +5,9 @@ import (
 )
 
 func main() {
-	err := gomux.Init(5)
+	term := gomux.NewTerminal()
+	err := term.Init()
+
 	if err != nil {
 		panic(err)
 	}
