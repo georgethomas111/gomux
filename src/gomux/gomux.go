@@ -1,12 +1,15 @@
 package gomux
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"termbox-go"
+	"unicode/utf8"
 )
 
 type Terminal struct {
@@ -17,6 +20,7 @@ type Terminal struct {
 	LinePrefix rune
 	FgColor    termbox.Attribute
 	BgColor    termbox.Attribute
+	Stdout     io.ReadWriter
 }
 
 const (
@@ -24,12 +28,24 @@ const (
 	CommandLength  = 100
 	DispLength     = 100
 	DispRuneLength = 100
+	OutFileName    = "/home/george/gomux.log"
 )
 
 var inputChan = make(chan termbox.Event, InputLength)
 var processChan = make(chan string, CommandLength)
 var dispChan = make(chan termbox.Event, DispLength)
 var dispRuneChan = make(chan rune, DispRuneLength)
+var drawSig = make(chan bool)
+
+func getStdOut() (w io.ReadWriter) {
+
+	w, err := os.Create(OutFileName)
+	if err != nil {
+		panic(err)
+		return nil
+	}
+	return
+}
 
 func NewTerminal() (term *Terminal) {
 	term = &Terminal{
@@ -40,6 +56,7 @@ func NewTerminal() (term *Terminal) {
 		LinePrefix: '$',
 		FgColor:    termbox.ColorDefault,
 		BgColor:    termbox.ColorDefault,
+		Stdout:     getStdOut(),
 	}
 	return
 }
@@ -75,13 +92,13 @@ func (t *Terminal) ProcessCommands() {
 		}
 
 		// Use custom stdout
-		gomuxCom.Stdout = os.Stdout
-		gomuxCom.Stderr = os.Stderr
+		// Or have a worker which gets the contents of 
+		// stdout and forwards it here
+		gomuxCom.Stdout = t.Stdout
+		gomuxCom.Stderr = t.Stdout
 		gomuxCom.Stdin = os.Stdin
-		err := gomuxCom.Run()
-		if err != nil {
-			panic(err)
-		}
+		gomuxCom.Run()
+		drawSig <- true
 	}
 }
 
@@ -111,6 +128,38 @@ func (t *Terminal) DrawFromEvent() {
 		}
 		termbox.SetCursor(t.CursorX+1, t.CursorY)
 		termbox.Flush()
+	}
+}
+
+
+// Use the t.Stdout read contents and draw on the screen.
+func (t *Terminal) DrawFromFile() {
+
+	for {
+		<-drawSig
+		fHandler, _ := os.Open(OutFileName)
+		for {
+			r := bufio.NewReader(fHandler)
+			buf := make([]byte, 1024)
+			read, err := r.Read(buf)
+			if err != nil && err != io.EOF {
+				panic(err)
+			}
+			if read == 0 {
+				break
+			}
+			fmt.Println(read)
+			decodedCount := 0
+			for {
+				data, size := utf8.DecodeRune(buf)
+				buf = buf[size:read]
+				decodedCount += size
+				dispRuneChan <- data
+				if decodedCount == read {
+					break
+				}
+			}
+		}
 	}
 }
 
@@ -145,6 +194,7 @@ func (t *Terminal) Run() error {
 	go t.ProcessCommands()
 	go t.DrawFromEvent()
 	go t.DrawFromRune()
+	go t.DrawFromFile()
 loop:
 	for {
 		event := termbox.PollEvent()
