@@ -2,7 +2,10 @@ package gomux
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"termbox-go"
 )
 
@@ -62,7 +65,23 @@ func (t *Terminal) Init() error {
 func (t *Terminal) ProcessCommands() {
 	for {
 		command := <-processChan
-		fmt.Println("Command", command)
+		var gomuxCom *exec.Cmd
+		cmdArgs := strings.Split(command, " ")
+		if len(cmdArgs) <= 1 {
+			gomuxCom = exec.Command(command)
+		} else {
+			gomuxCom = exec.Command(cmdArgs[0],
+				cmdArgs[1:len(cmdArgs)]...)
+		}
+
+		// Use custom stdout
+		gomuxCom.Stdout = os.Stdout
+		gomuxCom.Stderr = os.Stderr
+		gomuxCom.Stdin = os.Stdin
+		err := gomuxCom.Run()
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
