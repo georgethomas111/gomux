@@ -1,14 +1,13 @@
 package gomux
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"termbox-go"
+	"github.com/nsf/termbox-go"
 	"unicode/utf8"
 )
 
@@ -20,7 +19,8 @@ type Terminal struct {
 	LinePrefix rune
 	FgColor    termbox.Attribute
 	BgColor    termbox.Attribute
-	Stdout     io.ReadWriter
+	Stdout     io.WriteCloser
+	Stdin      io.ReadCloser
 }
 
 const (
@@ -28,7 +28,6 @@ const (
 	CommandLength  = 100
 	DispLength     = 100
 	DispRuneLength = 100
-	OutFileName    = "/home/george/gomux.log"
 )
 
 var inputChan = make(chan termbox.Event, InputLength)
@@ -37,17 +36,19 @@ var dispChan = make(chan termbox.Event, DispLength)
 var dispRuneChan = make(chan rune, DispRuneLength)
 var drawSig = make(chan bool)
 
-func getStdOut() (w io.ReadWriter) {
+func getStdOut() (rFile io.ReadCloser, wFile io.WriteCloser) {
 
-	w, err := os.Create(OutFileName)
+	rFile, wFile, err := os.Pipe()
 	if err != nil {
 		panic(err)
-		return nil
+		return nil, nil
 	}
 	return
 }
 
 func NewTerminal() (term *Terminal) {
+
+	reader, writer := getStdOut()
 	term = &Terminal{
 		Width:      0,
 		Height:     0,
@@ -56,7 +57,8 @@ func NewTerminal() (term *Terminal) {
 		LinePrefix: '$',
 		FgColor:    termbox.ColorDefault,
 		BgColor:    termbox.ColorDefault,
-		Stdout:     getStdOut(),
+		Stdout:     writer,
+		Stdin:      reader,
 	}
 	return
 }
@@ -92,12 +94,16 @@ func (t *Terminal) ProcessCommands() {
 		}
 
 		// Use custom stdout
-		// Or have a worker which gets the contents of 
+		// Or have a worker which gets the contents of
 		// stdout and forwards it here
 		gomuxCom.Stdout = t.Stdout
-		gomuxCom.Stderr = t.Stdout
+		gomuxCom.Stderr = os.Stderr
 		gomuxCom.Stdin = os.Stdin
-		gomuxCom.Run()
+		err := gomuxCom.Run()
+		if(err != nil) {
+			t.Stdout.Write([]byte(err.Error()))
+			defer t.Stdout.Close()
+		}
 		drawSig <- true
 	}
 }
@@ -106,9 +112,15 @@ func (t *Terminal) DrawFromRune() {
 	for {
 		ch := <-dispRuneChan
 		// Should a mutex lock be there ?
+		if ch == '\n' {
+			t.CursorX = 0
+			t.CursorY++
+		} else {
+			t.CursorX++
+		}
 		termbox.SetCell(t.CursorX, t.CursorY,
 			ch, t.FgColor, t.BgColor)
-		t.CursorX++
+		termbox.SetCursor(t.CursorX+1, t.CursorY)
 		termbox.Flush()
 	}
 }
@@ -120,7 +132,6 @@ func (t *Terminal) DrawFromEvent() {
 		case termbox.KeyEnter:
 			t.CursorY++
 			t.CursorX = 0
-			dispRuneChan <- t.LinePrefix
 		default:
 			t.CursorX++
 			termbox.SetCell(t.CursorX, t.CursorY,
@@ -131,35 +142,29 @@ func (t *Terminal) DrawFromEvent() {
 	}
 }
 
-
 // Use the t.Stdout read contents and draw on the screen.
 func (t *Terminal) DrawFromFile() {
 
 	for {
 		<-drawSig
-		fHandler, _ := os.Open(OutFileName)
-		for {
-			r := bufio.NewReader(fHandler)
-			buf := make([]byte, 1024)
-			read, err := r.Read(buf)
-			if err != nil && err != io.EOF {
-				panic(err)
-			}
-			if read == 0 {
-				break
-			}
-			fmt.Println(read)
-			decodedCount := 0
-			for {
-				data, size := utf8.DecodeRune(buf)
-				buf = buf[size:read]
-				decodedCount += size
-				dispRuneChan <- data
-				if decodedCount == read {
-					break
-				}
-			}
+		defer t.Stdin.Close()
+		// Should be made equal to the maximum size of pipe
+		// buffer wiki says unix one is 65536
+		buf := make([]byte, 65536)
+		read := -1
+		read, err := t.Stdin.Read(buf)
+		if err != nil && err != io.EOF {
+			panic(err)
 		}
+		decodedCount := 0
+		for decodedCount != (read - 1) {
+			data, size := utf8.DecodeRune(buf)
+			buf = buf[size:read]
+			decodedCount += size
+			dispRuneChan <- data
+		}
+		dispRuneChan <- '\n'
+		dispRuneChan <- t.LinePrefix
 	}
 }
 
